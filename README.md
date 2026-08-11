@@ -51,3 +51,10 @@ The C++ VPK CLI tool (`vpk_cli`) is a high-performance utility for managing Valv
 ```bash
 ./vpk_cli ./my_assets_folder -c new_assets.vpk
 ```
+
+---
+
+## 编译
+```bash
+mkdir build && cd build && cmake .. && make -j4
+```
