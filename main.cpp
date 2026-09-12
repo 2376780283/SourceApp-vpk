@@ -1,10 +1,3 @@
-// ========================================================
-//
-//   zzhlife / Pixel Z
-//
-// ========================================================
-
-
 #include "vpk.hpp"
 #include <iostream>
 #include <string>
@@ -98,7 +91,7 @@ int main(int argc, char* argv[]) {
                 }
                 std::cout << "Extracted " << count << " files." << std::endl;
             } else {
-                // 显示信息 ???
+                // 显示信息
                 std::cout << "VPK File:    " << path << std::endl;
                 std::cout << "Version:     " << pak.version() << std::endl;
                 std::cout << "Header size: " << pak.header_length() << std::endl;

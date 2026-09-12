@@ -1,10 +1,3 @@
-// ========================================================
-//
-//   zzhlife / Pixel Z
-//
-// ========================================================
-
-
 #include "vpk.hpp"
 #include <stdexcept>
 #include <iostream>
@@ -223,9 +216,12 @@ void VPK::read_index() {
 
                 std::string full_path;
                 if (path != " ") {
-                    full_path = path + "/" + name + "." + ext;
+                    full_path = path + "/" + name;
                 } else {
-                    full_path = name + "." + ext;
+                    full_path = name;
+                }
+                if (ext != " ") {
+                    full_path += "." + ext;
                 }
                 std::replace(full_path.begin(), full_path.end(), '\\', '/');
 
@@ -341,7 +337,14 @@ void VPKFile::save(const std::filesystem::path& op) {
     std::filesystem::create_directories(op.parent_path());
     std::ofstream out(op, std::ios::binary);
     if (!out.is_open()) throw std::runtime_error("Could not create output file: " + op.string());
-    fp_.clear(); fp_.seekg(data_offset_, std::ios::beg);
+    
+
+    if (meta_.preload_length > 0 && !preload_data_.empty()) {
+        out.write(reinterpret_cast<const char*>(preload_data_.data()), meta_.preload_length);
+    }
+
+    fp_.clear(); 
+    fp_.seekg(data_offset_, std::ios::beg);
     uint8_t buf[8192];
     size_t rem = meta_.file_length;
     while (rem > 0) {
@@ -367,10 +370,14 @@ void VPKWriter::read_dir(const std::filesystem::path& dir) {
         if (!entry.is_regular_file()) continue;
         std::filesystem::path full = entry.path();
         std::filesystem::path rel = std::filesystem::relative(full, input_dir_);
+        
         std::string ext = full.extension().string();
         if (!ext.empty() && ext[0] == '.') ext = ext.substr(1);
-        if (ext.empty()) continue; 
+        if (ext.empty()) ext = " "; 
+
         std::string filename = full.stem().string();
+        if (filename.empty()) filename = " ";
+
         std::string parent = rel.has_parent_path() ? rel.parent_path().string() : " ";
         std::replace(parent.begin(), parent.end(), '\\', '/');
         tree_[ext][parent][filename] = VPKFileSource{full, 0};
@@ -423,7 +430,10 @@ void VPKWriter::save_internal(const std::filesystem::path& out_path, bool use_ch
             for (auto& [fname, info] : files) {
                 dir_file.write(fname.c_str(), fname.size() + 1);
                 info.meta_pos = dir_file.tellp();
-                uint64_t dummy = 0; dir_file.write(reinterpret_cast<const char*>(&dummy), 18);
+                
+               
+                uint8_t dummy[18] = {0}; 
+                dir_file.write(reinterpret_cast<const char*>(dummy), 18);
             }
             dir_file.put('\0');
         }
@@ -436,12 +446,15 @@ void VPKWriter::save_internal(const std::filesystem::path& out_path, bool use_ch
     std::ofstream data_fp;
     std::string base = dir_path.stem().string();
     if (use_chunks && base.find("_dir") != std::string::npos) base = base.substr(0, base.find("_dir"));
+    
     auto open_new_chunk = [&](uint16_t idx) {
         if (data_fp.is_open()) data_fp.close();
         std::stringstream ss; ss << base << "_" << std::setw(3) << std::setfill('0') << idx << ".vpk";
         data_fp.open(dir_path.parent_path() / ss.str(), std::ios::binary | std::ios::trunc);
     };
-    if (use_chunks) open_new_chunk(archive_index); else data_fp.open(dir_path, std::ios::binary | std::ios::app);
+    
+    // 如果使用分卷，则开启独立 chunk 文件；如果为单文件 VPK，则绝对不双开文件流，直接追加写入 dir_file 保证数据连续
+    if (use_chunks) open_new_chunk(archive_index);
 
     struct FileEntry { VPKFileSource* info; uint32_t crc32; uint32_t file_len; uint16_t archive_idx; uint32_t archive_off; };
     std::vector<FileEntry> entries;
@@ -471,10 +484,13 @@ void VPKWriter::save_internal(const std::filesystem::path& out_path, bool use_ch
             while (src.read(reinterpret_cast<char*>(buf), sizeof(buf)) || src.gcount() > 0) data_fp.write(reinterpret_cast<const char*>(buf), src.gcount());
             current_chunk_size += e.file_len;
         } else {
-            e.archive_idx = VPKFILENUMBER_EMBEDDED_IN_DIR_FILE; e.archive_off = static_cast<uint32_t>(embed_offset);
+            e.archive_idx = VPKFILENUMBER_EMBEDDED_IN_DIR_FILE; 
+            e.archive_off = static_cast<uint32_t>(embed_offset);
             std::ifstream src(e.info->src_path, std::ios::binary);
             uint8_t buf[8192];
-            while (src.read(reinterpret_cast<char*>(buf), sizeof(buf)) || src.gcount() > 0) data_fp.write(reinterpret_cast<const char*>(buf), src.gcount());
+            while (src.read(reinterpret_cast<char*>(buf), sizeof(buf)) || src.gcount() > 0) {
+                dir_file.write(reinterpret_cast<const char*>(buf), src.gcount());
+            }
             embed_offset += e.file_len;
         }
     }
@@ -491,12 +507,13 @@ void VPKWriter::save_internal(const std::filesystem::path& out_path, bool use_ch
         dir_file.write(reinterpret_cast<const char*>(&suffix), 2);
     }
     
-    // --- MD5 Implementation ---
     size_t embed_chunk_length = use_chunks ? 0 : embed_offset;
     dir_file.seekp(sizeof(VPKHeaderV1));
     dir_file.write(reinterpret_cast<const char*>(&embed_chunk_length), 4);
-    dir_file.flush(); dir_file.close();
+    dir_file.flush(); 
+    dir_file.close(); // 先关闭，准备重新以读方式打开并计算校验和
 
+    // --- 符合标准的 MD5 实现 ---
     std::ifstream check_file(dir_path, std::ios::binary);
     MD5Context tree_ctx, chunk_hashes_ctx, file_ctx;
     md5_init(&tree_ctx); md5_init(&chunk_hashes_ctx); md5_init(&file_ctx);
@@ -513,17 +530,16 @@ void VPKWriter::save_internal(const std::filesystem::path& out_path, bool use_ch
         md5_update(&file_ctx, buf.data(), r);
         tree_rem -= r;
     }
-    size_t chunk_rem = embed_chunk_length;
-    while (chunk_rem > 0) {
-        size_t r = std::min(chunk_rem, buf.size());
-        check_file.read(reinterpret_cast<char*>(buf.data()), r);
-        md5_update(&file_ctx, buf.data(), r);
-        chunk_rem -= r;
+    
+    if (!use_chunks && embed_chunk_length > 0) {
+        check_file.seekg(embed_chunk_length, std::ios::cur);
     }
     
     uint8_t t_digest[16], c_digest[16], f_digest[16];
     MD5Context t_ctx = tree_ctx, c_ctx = chunk_hashes_ctx;
-    md5_final(t_digest, &t_ctx); md5_final(c_digest, &c_ctx);
+    md5_final(t_digest, &t_ctx); 
+    md5_final(c_digest, &c_ctx);
+    
     md5_update(&file_ctx, t_digest, 16);
     md5_update(&file_ctx, c_digest, 16);
     md5_final(f_digest, &file_ctx);
